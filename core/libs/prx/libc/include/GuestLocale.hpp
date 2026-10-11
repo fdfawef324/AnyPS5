@@ -45,6 +45,16 @@ struct String {
     std::uint64_t capacity;
 };
 
+struct WideString {
+    std::uint64_t reserved;
+    union {
+        char16_t buffer[8];
+        char16_t* pointer;
+    };
+    std::uint64_t size;
+    std::uint64_t capacity;
+};
+
 struct CollateFacet {
     Facet base;
     const void* collation;
@@ -56,6 +66,13 @@ struct CollateVtable {
     int (APS5_VABI *compare)(const CollateFacet* self, const char* first1, const char* last1, const char* first2, const char* last2);
     String* (APS5_VABI *transform)(String* result, const CollateFacet* self, const char* first, const char* last);
     std::int64_t (APS5_VABI *hash)(const CollateFacet* self, const char* first, const char* last);
+};
+
+struct WideCollateVtable {
+    FacetVtable facet;
+    int (APS5_VABI *compare)(const CollateFacet* self, const char16_t* first1, const char16_t* last1, const char16_t* first2, const char16_t* last2);
+    WideString* (APS5_VABI *transform)(WideString* result, const CollateFacet* self, const char16_t* first, const char16_t* last);
+    std::int64_t (APS5_VABI *hash)(const CollateFacet* self, const char16_t* first, const char16_t* last);
 };
 
 struct IosBase {
@@ -85,10 +102,15 @@ static_assert(sizeof(IosBase) == 0x40);
 static_assert(offsetof(String, buffer) == 0x8);
 static_assert(offsetof(String, size) == 0x18);
 static_assert(sizeof(String) == 0x28);
+static_assert(offsetof(WideString, buffer) == 0x8);
+static_assert(offsetof(WideString, size) == 0x18);
+static_assert(sizeof(WideString) == 0x28);
 static_assert(offsetof(CollateFacet, collation) == 0x10);
 static_assert(sizeof(CollateFacet) == 0x20);
 static_assert(offsetof(CollateVtable, compare) == 0x20);
 static_assert(offsetof(CollateVtable, hash) == 0x30);
+static_assert(offsetof(WideCollateVtable, compare) == 0x20);
+static_assert(offsetof(WideCollateVtable, hash) == 0x30);
 static_assert(alignof(LocinfoStorage) == 8);
 
 }
