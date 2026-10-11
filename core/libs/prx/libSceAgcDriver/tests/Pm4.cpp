@@ -63,7 +63,7 @@ void testCatalog() {
         const auto reason = AgcDriver::Pm4::UnsupportedReason(packet[0]);
         if (!reason.empty()) expectFailure([&] { AgcDriver::Pm4::Validate(packet, 0); }, std::string(reason).c_str());
     }
-    check(values.size() == 55, "reference opcode catalog is incomplete");
+    check(values.size() == 56, "reference opcode catalog is incomplete");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0xff, {0}), 0); }, "not known");
     const std::array<std::pair<std::uint32_t, const char*>, 11> custom{{
         {5, "DRAW_RESET"}, {6, "WAIT_FLIP_DONE"}, {9, "DISPATCH_RESET"}, {11, "PUSH_MARKER"},

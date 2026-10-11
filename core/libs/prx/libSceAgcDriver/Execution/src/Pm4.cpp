@@ -215,6 +215,7 @@ std::string_view UnsupportedReason(std::uint32_t header) {
         case 0x43: case 0x47: case 0x48:
             return "guest cache actions, GPU events and interrupt delivery are not implemented";
         case 0x8e: return "GPU LOD statistics are not implemented; synthetic results are forbidden";
+        case 0x91: return "index buffer attributes read from memory are not implemented: the record layout is not established";
         case 0x41: case 0x68: case 0x78:
             return "opcode is named but has no handler in the reference dispatch table";
         default: return "opcode is not known in the reference";
