@@ -995,6 +995,19 @@ void DepthStencilTests() {
     }
     Require(state.renderExtent.width == 4 && state.renderExtent.height == 2, "render extent ignores the depth surface");
     Require(!state.depthTest && !state.depthWrite && state.stencilTest, "depth/stencil enables changed");
+    {
+        auto resummarize = queue;
+        resummarize.context[0x000] = 0x10;
+        resummarize.context[0x200] = 0x007007f3;
+        resummarize.context[0x10b] = 0;
+        resummarize.context[0x8e] = 0;
+        resummarize.context[0x8f] = 0;
+        const auto summary = AgcDriver::Graphics::DecodeState(resummarize);
+        const auto kept = [](const VkStencilOpState& face) { return face.failOp == VK_STENCIL_OP_KEEP && face.passOp == VK_STENCIL_OP_KEEP && face.depthFailOp == VK_STENCIL_OP_KEEP && face.compareOp == VK_COMPARE_OP_ALWAYS; };
+        Require(summary.depth && summary.depthTest && !summary.depthWrite && summary.depthCompare == VK_COMPARE_OP_ALWAYS && summary.stencilTest && kept(summary.stencilFront) && kept(summary.stencilBack), "a resummarize draw that writes nothing decoded with depth or stencil writes");
+        resummarize.context[0x000] = 0x14;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(resummarize); }, "DB_RENDER_CONTROL");
+    }
     queue.context.erase(0x005);
     Require(AgcDriver::Graphics::DecodeState(queue).depth->htileAddress == 0, "an HTILE surface without DB_HTILE_DATA_BASE decoded an HTILE address");
     queue.context[0x005] = 0x300;
@@ -1176,7 +1189,22 @@ void depthMaintenanceTests() {
         queue.context[0x8f] = 0;
         Require(AgcDriver::Graphics::DepthMaintenanceRejection(queue).empty(), "a resummarize draw without depth, stencil or color work was rejected");
         queue.context[0x200] = 2;
-        Require(AgcDriver::Graphics::DepthMaintenanceRejection(queue).find("DB_RENDER_CONTROL") != std::string::npos, "a resummarize draw with a depth test passed");
+        Require(AgcDriver::Graphics::DepthMaintenanceRejection(queue).empty(), "a resummarize draw with a depth test and no depth writes was rejected");
+        queue.context[0x200] = 4;
+        Require(AgcDriver::Graphics::DepthMaintenanceRejection(queue).empty(), "a resummarize draw with depth writes but no depth test was rejected");
+        queue.context[0x200] = 6;
+        Require(AgcDriver::Graphics::DepthMaintenanceRejection(queue).find("DB_RENDER_CONTROL") != std::string::npos, "a resummarize draw with depth writes passed");
+        queue.context[0x200] = 0x007007f3u;
+        Require(AgcDriver::Graphics::DepthMaintenanceRejection(queue).find("DB_RENDER_CONTROL") != std::string::npos, "a resummarize draw with stencil tests and unknown stencil operations passed");
+        queue.context[0x10b] = 0;
+        Require(AgcDriver::Graphics::DepthMaintenanceRejection(queue).empty(), "a resummarize draw with always-passing tests and kept stencil was rejected");
+        for (const auto operation : {0x2u, 0x20u, 0x200u, 0x2000u, 0x20000u, 0x200000u}) {
+            queue.context[0x10b] = operation;
+            Require(AgcDriver::Graphics::DepthMaintenanceRejection(queue).find("DB_RENDER_CONTROL") != std::string::npos, "a resummarize draw with stencil writes passed");
+        }
+        queue.context[0x200] = 0x007007f2u;
+        Require(AgcDriver::Graphics::DepthMaintenanceRejection(queue).empty(), "a resummarize draw with stencil operations but no stencil test was rejected");
+        queue.context.erase(0x10b);
         queue.context[0x200] = 0;
         queue.context[0x8e] = 0xf;
         queue.context[0x8f] = 0xf;

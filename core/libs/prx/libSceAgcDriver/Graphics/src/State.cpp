@@ -194,7 +194,7 @@ VkStencilOpState stencilFace(std::uint32_t compare, std::uint32_t ops, std::uint
 }
 
 void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result) {
-    zero(cx, 0x000, 0x00001f9cu, "depth copy, resummarize or decompress draws (DB_RENDER_CONTROL)");
+    zero(cx, 0x000, 0x00001f8cu, "depth copy or decompress draws (DB_RENDER_CONTROL)");
     const bool depthClear = (read(cx, 0x000) & 1u) != 0;
     const bool stencilClear = (read(cx, 0x000) & 2u) != 0;
     const auto view = read(cx, 0x002);
@@ -541,8 +541,11 @@ std::string DepthMaintenanceRejection(const QueueState& queue) {
     const auto control = find(queue.context, 0x000);
     if (control == queue.context.end() || (control->second & ~0x2063u) == 0) return {};
     const auto depthControl = find(queue.context, 0x200);
+    const auto stencilOps = find(queue.context, 0x10b);
     const bool colorMasks = find(queue.context, 0x8e) != queue.context.end() && find(queue.context, 0x8f) != queue.context.end();
-    if ((control->second & ~0x2063u) == 0x10u && depthControl != queue.context.end() && (depthControl->second & 3u) == 0 && colorMasks && ColorWriteMask(queue.context) == 0) return {};
+    const bool depthWrites = depthControl == queue.context.end() || (depthControl->second & 6u) == 6u;
+    const bool stencilWrites = depthControl == queue.context.end() || ((depthControl->second & 1u) != 0 && (stencilOps == queue.context.end() || (stencilOps->second & 0xffffffu) != 0));
+    if ((control->second & ~0x2063u) == 0x10u && !depthWrites && !stencilWrites && colorMasks && ColorWriteMask(queue.context) == 0) return {};
     return zeroMessage(0x000, control->second, "DB_RENDER_CONTROL depth copy, resummarize or decompress");
 }
 
