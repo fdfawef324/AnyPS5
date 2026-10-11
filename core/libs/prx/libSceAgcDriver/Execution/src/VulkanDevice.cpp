@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DispatchChunks.hpp"
 #include "prx/libSceAgcDriver/Execution/include/FragmentBarycentric.hpp"
 #include "prx/libSceAgcDriver/Execution/include/SubgroupClock.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderDeviceProfile.hpp"
@@ -72,6 +73,11 @@ std::string workgroupLimitError(std::uint32_t x, std::uint32_t y, std::uint32_t 
     char text[160];
     std::snprintf(text, sizeof(text), "Vulkan dispatch: workgroup count %ux%ux%u exceeds device limits %ux%ux%u", x, y, z, limit[0], limit[1], limit[2]);
     return text;
+}
+
+void requireSplittableDispatch(const DispatchGroups& groups, const std::uint32_t* limit, std::uint32_t workgroupMemoryDwords, const std::string& where = {}) {
+    if (DispatchWithinLimits(groups, limit) || workgroupMemoryDwords == 0) return;
+    throw std::runtime_error(workgroupLimitError(groups[0], groups[1], groups[2], limit) + where + ": the program's LDS in device memory is sliced by NumWorkgroups, which splitting the dispatch would change");
 }
 
 // The ShaderResources content cache dispatches share with recorded draws: Graphics::ResourceCache,
@@ -3460,10 +3466,10 @@ void VulkanDevice::decideIndirect(RecordedDispatch& record, IndirectOutcome& out
     record.arguments = 0;
     timer.indirect = false;
     std::snprintf(groupsText, 40, "%ux%ux%u", record.x, record.y, record.z);
-    if (record.x > limit[0] || record.y > limit[1] || record.z > limit[2]) {
+    if (!DispatchWithinLimits({record.x, record.y, record.z}, limit)) {
         char where[96];
         std::snprintf(where, sizeof(where), " (indirect arguments at 0x%llx read by the CPU, reason %d)", static_cast<unsigned long long>(arguments), outcome.cpuReason);
-        throw std::runtime_error(workgroupLimitError(record.x, record.y, record.z, limit) + where);
+        requireSplittableDispatch({record.x, record.y, record.z}, limit, record.shader->program->workgroupMemoryDwords, where);
     }
 }
 
@@ -3567,7 +3573,13 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
     }
     const auto gpuTiming = recorder.BeginGpuTiming(record.programAddress != 0 ? record.programAddress : record.shader->program->variantId);
     if (argumentImport != nullptr) context.Resolved(&Graphics::DeviceFunctions::cmdDispatchIndirect, "vkCmdDispatchIndirect")(commands, argumentImport->buffer, arguments - argumentImport->base);
-    else context.Resolved(&Graphics::DeviceFunctions::cmdDispatch, "vkCmdDispatch")(commands, record.x, record.y, record.z);
+    else if (const DispatchGroups groups{record.x, record.y, record.z}; DispatchWithinLimits(groups, state->properties.limits.maxComputeWorkGroupCount)) context.Resolved(&Graphics::DeviceFunctions::cmdDispatch, "vkCmdDispatch")(commands, record.x, record.y, record.z);
+    else {
+        const auto dispatchBase = context.Resolved(&Graphics::DeviceFunctions::cmdDispatchBase, "vkCmdDispatchBase");
+        ForEachDispatchChunk(groups, state->properties.limits.maxComputeWorkGroupCount, [&](const DispatchGroups& base, const DispatchGroups& count) {
+            dispatchBase(commands, base[0], base[1], base[2], count[0], count[1], count[2]);
+        });
+    }
     recorder.EndGpuTiming(gpuTiming);
     const auto trailingTiming = recorder.BeginGpuTiming(CommandClass::DispatchTrailing);
     constexpr VkAccessFlags dispatchedAccess = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
@@ -3615,9 +3627,7 @@ VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::Rec
     auto pushBytes = Graphics::AssemblePushConstants(shaders);
     const auto context = graphicsContext();
     const auto* limit = state->properties.limits.maxComputeWorkGroupCount;
-    if (arguments == 0 && (x > limit[0] || y > limit[1] || z > limit[2])) {
-        throw std::runtime_error(workgroupLimitError(x, y, z, limit));
-    }
+    if (arguments == 0) requireSplittableDispatch({x, y, z}, limit, shader.workgroupMemoryDwords);
     // Pipelines are shared by dispatches of one compiled variant; descriptor set layouts built from the
     // same bindings are compatible, so the pipeline layout of the first dispatch serves them all.
     const std::uint64_t pipelineKey = shader.PipelineVariantId() != 0 ? (shader.PipelineVariantId() << 1u) | (pushStages != 0 ? 1u : 0u) : 0u;
@@ -3784,7 +3794,7 @@ VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::Rec
         layoutInfo.pPushConstantRanges = pushStages != 0 ? &push : nullptr;
         check(state->DeviceFunction<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(state->device, &layoutInfo, nullptr, &objects->layout), "vkCreatePipelineLayout");
         VkComputePipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        pipelineInfo.flags = context.pipelineExecutableInfo ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR : 0;
+        pipelineInfo.flags = VK_PIPELINE_CREATE_DISPATCH_BASE_BIT | (context.pipelineExecutableInfo ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR : 0);
         pipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         pipelineInfo.stage.module = objects->module;
@@ -3902,9 +3912,7 @@ RecipeOutcome VulkanDevice::DispatchRecipe(const ShaderRecompiler::RecompileResu
     const std::array<Graphics::CompiledShader, 1> shaders{{{ShaderRecompiler::ShaderStage::Compute, &shader, 0}}};
     const auto context = graphicsContext();
     const auto* limit = state->properties.limits.maxComputeWorkGroupCount;
-    if (arguments == 0 && (x > limit[0] || y > limit[1] || z > limit[2])) {
-        throw std::runtime_error(workgroupLimitError(x, y, z, limit));
-    }
+    if (arguments == 0) requireSplittableDispatch({x, y, z}, limit, shader.workgroupMemoryDwords);
     if (recipe.needsCompletion || recipe.holdsLease || !hit->resources->Reusable()) throw std::runtime_error("Vulkan dispatch: recipe over a non-reusable template");
     // Without the refresh the template holds the words it was keyed with: a data-only hit takes
     // the ordinary path, whose word-keyed lookup serves or builds the object for the live words.
