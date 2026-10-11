@@ -939,6 +939,7 @@ int64_t APS5_VABI pwritev_nid_postfix(int d, const KernelIovec* iov, int iovcnt,
 
 int APS5_VABI sceKernelRename(const char* from, const char* to) {
     if (from == nullptr || to == nullptr) throw std::invalid_argument("sceKernelRename: path is null");
+    if (*from == '\0' || *to == '\0') return SceErrorFromErrno(GUEST_ENOENT);
     const auto source = ResolvePath_nid_no_patch(from);
     std::error_code error;
     if (!std::filesystem::exists(source, error)) return SceErrorFromErrno(GUEST_ENOENT);
@@ -952,6 +953,7 @@ int APS5_VABI sceKernelRename(const char* from, const char* to) {
 
 int APS5_VABI sceKernelRmdir(const char* path) {
     if (path == nullptr) throw std::invalid_argument("sceKernelRmdir: path is null");
+    if (*path == '\0') return SceErrorFromErrno(GUEST_ENOENT);
     const auto native = ResolvePath_nid_no_patch(path);
     std::error_code error;
     if (!std::filesystem::is_directory(native, error)) return SceErrorFromErrno(std::filesystem::exists(native, error) ? GUEST_ENOTDIR : GUEST_ENOENT);
@@ -987,6 +989,7 @@ int APS5_VABI fchmod_nid_postfix(int d, int mode) {
 int APS5_VABI sceKernelTruncate_nid_postfix(const char* path, std::int64_t length) {
     if (path == nullptr) throw std::invalid_argument("sceKernelTruncate: path is null");
     if (length < 0) return SceErrorFromErrno(GUEST_EINVAL);
+    if (*path == '\0') return SceErrorFromErrno(GUEST_ENOENT);
     const auto native = ResolvePath_nid_no_patch(path);
     std::error_code error;
     if (!std::filesystem::exists(native, error)) return SceErrorFromErrno(GUEST_ENOENT);
@@ -1003,6 +1006,7 @@ int APS5_VABI sceKernelUtimes_nid_postfix(const char* path, const KernelTimeval*
             if (times[i].tv_usec < 0 || times[i].tv_usec >= 1000000) return SCE_KERNEL_ERROR_EINVAL;
         }
     }
+    if (*path == '\0') return SceErrorFromErrno(GUEST_ENOENT);
     const auto native = ResolvePath_nid_no_patch(path);
     if (NativeUtimes(native, times) != 0) return SceErrorFromErrno(errno);
     return 0;

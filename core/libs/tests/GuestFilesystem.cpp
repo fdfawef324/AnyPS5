@@ -44,6 +44,7 @@ int APS5_VABI sceKernelStat(const char*, FileStat*);
 int APS5_VABI sceKernelFstat(int, FileStat*);
 int APS5_VABI sceKernelUnlink(const char*);
 int APS5_VABI sceKernelRmdir(const char*);
+int APS5_VABI sceKernelRename(const char*, const char*);
 int* APS5_VABI __error_nid_postfix();
 int APS5_VABI pipe_nid_postfix(int*);
 std::int64_t APS5_VABI read_nid_postfix(int, void*, std::size_t);
@@ -181,6 +182,9 @@ int main() {
       Require(contents == "012345"); }
     Require(sceKernelTruncate_nid_postfix((sized / "missing").string().c_str(), 6) == static_cast<int>(0x80020002u));
     Require(sceKernelUtimes_nid_postfix(sized.string().c_str(), nullptr) == 0);
+    Require(sceKernelTruncate_nid_postfix("", 6) == static_cast<int>(0x80020002u));
+    Require(sceKernelTruncate_nid_postfix("", -1) == static_cast<int>(0x80020016u));
+    Require(sceKernelUtimes_nid_postfix("", nullptr) == static_cast<int>(0x80020002u));
     std::FILE* native = std::fopen(sized.string().c_str(), "r+b");
     Require(native != nullptr);
 #ifdef _WIN32
@@ -239,6 +243,7 @@ int main() {
     Require(stat_nid_postfix(missingName.c_str(), &status) == -1 && *__error_nid_postfix() == 2);
     Require(sceKernelStat(missingName.c_str(), &status) == static_cast<int>(0x80020002u));
     Require(stat_nid_postfix("", &status) == -1 && *__error_nid_postfix() == 2);
+    Require(sceKernelStat("", &status) == static_cast<int>(0x80020002u));
     Require(stat_nid_postfix((presentName + "/").c_str(), &status) == -1 && *__error_nid_postfix() == 20);
     Require(sceKernelStat((presentName + "/").c_str(), &status) == static_cast<int>(0x80020014u));
     Require(sceKernelStat("\xff\xfe", &status) == static_cast<int>(0x80020002u));
@@ -390,6 +395,10 @@ int main() {
     Require(sceKernelOpen(missingName.c_str(), 0x20000, 0) == static_cast<int>(0x80020002u));
     Require(open_nid_postfix("", 0, 0) == -1 && *__error_nid_postfix() == 2);
     Require(_open_nid_postfix("", 0) == -1 && *__error_nid_postfix() == 2);
+    Require(sceKernelOpen("", 0, 0777) == static_cast<int>(0x80020002u));
+    Require(sceKernelOpen("", 0x20000, 0) == static_cast<int>(0x80020002u));
+    Require(sceKernelRename("", presentName.c_str()) == static_cast<int>(0x80020002u) && std::filesystem::exists(present));
+    Require(sceKernelRename(presentName.c_str(), "") == static_cast<int>(0x80020002u) && std::filesystem::exists(present));
     Require(open_nid_postfix(nullptr, 0, 0) == -1 && *__error_nid_postfix() == 14);
     Require(_open_nid_postfix(nullptr, 0) == -1 && *__error_nid_postfix() == 14);
     Require(rmdir_nid_postfix(rootName.c_str()) == -1 && *__error_nid_postfix() == 66);
@@ -417,10 +426,12 @@ int main() {
     const auto lockedDirectoryKernel = lockedDirectory("locked-directory-kernel");
     Require(sceKernelRmdir(lockedDirectoryKernel.string().c_str()) == 0 && !std::filesystem::exists(lockedDirectoryKernel));
     Require(rmdir_nid_postfix("") == -1 && *__error_nid_postfix() == 2);
+    Require(sceKernelRmdir("") == static_cast<int>(0x80020002u));
     Require(rmdir_nid_postfix(nullptr) == -1 && *__error_nid_postfix() == 14);
     Require(unlink_nid_postfix(missingName.c_str()) == -1 && *__error_nid_postfix() == 2);
     Require(sceKernelUnlink(missingName.c_str()) == static_cast<int>(0x80020002u));
     Require(unlink_nid_postfix("") == -1 && *__error_nid_postfix() == 2);
+    Require(sceKernelUnlink("") == static_cast<int>(0x80020002u));
     Require(unlink_nid_postfix(nullptr) == -1 && *__error_nid_postfix() == 14);
     Require(unlink_nid_postfix(rootName.c_str()) == -1 && *__error_nid_postfix() == 1 && std::filesystem::is_directory(root));
     Require(sceKernelUnlink(rootName.c_str()) == static_cast<int>(0x80020001u));
