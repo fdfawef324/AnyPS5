@@ -267,9 +267,35 @@ static void UnpinStack(const void*, std::uint64_t) {}
 
 #ifdef _WIN32
 
-static void AllocateHostStack(Fiber*) {}
+static std::uint64_t HostStackGuardBytes() {
+    static const std::uint64_t bytes = [] {
+        SYSTEM_INFO system{};
+        GetSystemInfo(&system);
+        return static_cast<std::uint64_t>(system.dwPageSize);
+    }();
+    return bytes;
+}
 
-static void ReleaseHostStack(Fiber*) {}
+static void AllocateHostStack(Fiber* fiber) {
+    const auto page = HostStackGuardBytes();
+    const auto bytes = (fiber->contextSize + FIBER_HOST_STACK_MARGIN + page - 1) / page * page + page;
+    auto* mapping = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    if (mapping == nullptr) throw std::runtime_error(std::string("sceFiberInitialize: no host stack of ") + std::to_string(bytes) + " bytes for fiber '" + fiber->name + "' (error " + std::to_string(GetLastError()) + ")");
+    DWORD previous = 0;
+    if (!VirtualProtect(mapping, page, PAGE_NOACCESS, &previous)) {
+        const auto error = GetLastError();
+        VirtualFree(mapping, 0, MEM_RELEASE);
+        throw std::runtime_error(std::string("sceFiberInitialize: cannot protect the guard page of the host stack of fiber '") + fiber->name + "' (error " + std::to_string(error) + ")");
+    }
+    fiber->hostStack = mapping;
+    fiber->hostStackBytes = bytes;
+}
+
+static void ReleaseHostStack(Fiber* fiber) {
+    if (fiber->hostStack && !VirtualFree(fiber->hostStack, 0, MEM_RELEASE)) throw std::runtime_error(std::string("sceFiberFinalize: cannot release the host stack of fiber '") + fiber->name + "' (error " + std::to_string(GetLastError()) + ")");
+    fiber->hostStack = nullptr;
+    fiber->hostStackBytes = 0;
+}
 
 #else
 
@@ -303,9 +329,19 @@ static std::uint64_t* SizedWindow(const Fiber* fiber) {
     return reinterpret_cast<std::uint64_t*>(StackTop(fiber) - fiber->contextSize);
 }
 
+#ifdef _WIN32
+
+static StackBounds FiberBounds(const Fiber* fiber) {
+    return {fiber->hostStack + fiber->hostStackBytes, fiber->hostStack + HostStackGuardBytes(), fiber->hostStack};
+}
+
+#else
+
 static StackBounds FiberBounds(const Fiber* fiber) {
     return {fiber->context + fiber->contextSize, fiber->context, fiber->context};
 }
+
+#endif
 
 static Fiber* AsFiber(FiberObject* object) {
     auto* fiber = reinterpret_cast<Fiber*>(object);

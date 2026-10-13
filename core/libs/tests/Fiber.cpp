@@ -6,6 +6,9 @@
 #include <cstdlib>
 #include <thread>
 #include <xmmintrin.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 using Entry = void (APS5_VABI*)(std::uint64_t, std::uint64_t);
 
@@ -128,7 +131,21 @@ std::size_t DescendHostStack(std::size_t remaining) {
     return frames + 1;
 }
 
+#ifdef _WIN32
+void CheckWindowsHostStack() {
+    const auto* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+    const auto low = reinterpret_cast<std::uintptr_t>(tib->StackLimit);
+    const auto high = reinterpret_cast<std::uintptr_t>(tib->StackBase);
+    const volatile unsigned char marker = 0;
+    const auto frame = reinterpret_cast<std::uintptr_t>(&marker);
+    Require(frame > low && frame < high && high - low >= HostCallContextSize + HostCallStack, "the thread's stack bounds are the fiber's host stack");
+}
+#endif
+
 void APS5_VABI HostCallEntry(std::uint64_t, std::uint64_t) {
+#ifdef _WIN32
+    CheckWindowsHostStack();
+#endif
     Require(g_descendHostStack(HostCallStack) == HostCallStack / HostCallFrameSize, "host call depth");
     std::uint64_t received = 0;
     for (;;) sceFiberReturnToThread(0, &received);
