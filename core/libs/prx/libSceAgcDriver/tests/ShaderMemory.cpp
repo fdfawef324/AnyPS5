@@ -10,6 +10,7 @@
 #include "Optimization/SrtWalker/SrtEvaluator.hpp"
 #include "Optimization/SrtWalker/SrtInstructionPredicates.hpp"
 #include "Optimization/SrtWalker/SrtFlatSlotClasses.hpp"
+#include "Optimization/TessellationLowering.hpp"
 #include "Optimization/SrtWalker.hpp"
 #include "IntermediateRepresentation/IrBuilder.hpp"
 #include "SpirvBackend/SpirvAnalysis.hpp"
@@ -28,6 +29,7 @@
 #include <map>
 #include <future>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <span>
 #include <string>
@@ -1685,6 +1687,133 @@ void verifyMeshConfiguration() {
     }
 }
 
+struct HullRingStores {
+    ShaderRecompiler::IrProgram program;
+    ShaderRecompiler::IrValue* point = nullptr;
+    ShaderRecompiler::IrValue* record = nullptr;
+};
+
+std::unique_ptr<HullRingStores> hullRingStores(std::uint32_t recordStride) {
+    using namespace ShaderRecompiler;
+    auto hull = std::make_unique<HullRingStores>();
+    auto& program = hull->program;
+    program.Resources().stage = IrShaderStage::TessellationControl;
+    MemoryInfo ring;
+    ring.kind = ResourceKind::Buffer;
+    ring.offen = true;
+    program.Resources().memoryInfo = {ring};
+    auto& block = program.CreateBlock();
+    program.SetEntryBlock(block);
+    program.BlockOrder().push_back(&block);
+    const auto constant = [&](std::uint32_t value) -> IrValue& {
+        auto& created = program.CreateValue(IrOpcode::Void, IrType::U32);
+        created.SetImmediateU32(value);
+        return created;
+    };
+    const auto emit = [&](IrOpcode opcode, IrType type, std::initializer_list<IrValue*> arguments, std::uint64_t flags = 0) -> IrValue& {
+        auto& value = program.CreateValue(opcode, type, flags);
+        for (auto* argument : arguments) value.AddArgument(argument);
+        block.AppendInstruction(&value);
+        return value;
+    };
+    const auto u32 = [&](IrOpcode opcode, IrValue& left, IrValue& right) -> IrValue& { return emit(opcode, IrType::U32, {&left, &right}); };
+    const auto field = [&](IrValue& source, std::uint32_t offset, std::uint32_t count) -> IrValue& { return emit(IrOpcode::BitFieldUExtract, IrType::U32, {&source, &constant(offset), &constant(count)}); };
+    const auto memory = [](std::uint32_t pc) {
+        const MemoryFlags flags{0u, pc};
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, &flags, sizeof(flags));
+        return bits;
+    };
+    auto& active = program.CreateValue(IrOpcode::Void, IrType::Bool);
+    active.SetImmediateBool(true);
+    auto& offChip = emit(IrOpcode::TessellationBase, IrType::U32, {&constant(static_cast<std::uint32_t>(TessellationBaseKind::OffChip))});
+    auto& relative = emit(IrOpcode::TessellationBase, IrType::U32, {&constant(static_cast<std::uint32_t>(TessellationBaseKind::RelativeIndex))});
+    auto& invocation = emit(IrOpcode::GetBuiltin, IrType::U32, {&constant(static_cast<std::uint32_t>(StageInputKind::InvocationId)), &constant(0u)});
+    auto& ids = u32(IrOpcode::BitwiseOr32, u32(IrOpcode::ShiftLeftLogical32, invocation, constant(8u)), relative);
+    auto& patch = field(ids, 0u, 8u);
+    auto& point = field(ids, 8u, 5u);
+    hull->point = &u32(IrOpcode::IAdd32, u32(IrOpcode::IMul32, constant(48u), field(patch, 0u, 24u)), u32(IrOpcode::IMul32, constant(16u), field(point, 0u, 24u)));
+    static_cast<void>(emit(IrOpcode::StoreBufferU32, IrType::Void, {&constant(0u), &constant(0u), hull->point, &offChip, &constant(1u), &active}, memory(0x10u)));
+    hull->record = &u32(IrOpcode::ISub32, constant(0x8000u), u32(IrOpcode::IMul32, constant(recordStride), field(u32(IrOpcode::IAdd32, constant(1u), patch), 0u, 24u)));
+    auto& first = emit(IrOpcode::ULessThan32, IrType::Bool, {&point, &constant(1u)});
+    static_cast<void>(emit(IrOpcode::StoreBufferU32, IrType::Void, {&constant(0u), &constant(0u), hull->record, &offChip, &constant(2u), &first}, memory(0x20u)));
+    return hull;
+}
+
+std::uint32_t ringOffset(const ShaderRecompiler::IrValue* raw, std::uint32_t point, std::uint32_t patch) {
+    using namespace ShaderRecompiler;
+    const IrValue* value = raw->Resolve();
+    if (value->HasImmediate()) return value->ImmediateU32();
+    const auto argument = [&](std::size_t index) { return ringOffset(value->Argument(index), point, patch); };
+    switch (value->Opcode()) {
+    case IrOpcode::TessellationBase:
+        return patch;
+    case IrOpcode::GetBuiltin:
+        return point;
+    case IrOpcode::IAdd32:
+        return argument(0) + argument(1);
+    case IrOpcode::ISub32:
+        return argument(0) - argument(1);
+    case IrOpcode::IMul32:
+        return argument(0) * argument(1);
+    case IrOpcode::ShiftLeftLogical32:
+        return argument(0) << argument(1);
+    case IrOpcode::BitwiseOr32:
+        return argument(0) | argument(1);
+    case IrOpcode::BitFieldUExtract:
+        return (argument(0) >> argument(1)) & ((1u << argument(2)) - 1u);
+    default:
+        throw std::runtime_error("tessellation ring addresses: unexpected opcode in the test program");
+    }
+}
+
+ShaderRecompiler::ShaderTessellationInputInfo triangleTessellation(std::uint32_t controlPoints) {
+    ShaderRecompiler::ShaderTessellationInputInfo triangles{};
+    triangles.inputControlPoints = controlPoints;
+    triangles.outputControlPoints = controlPoints;
+    triangles.domain = 1u;
+    triangles.partitioning = 2u;
+    triangles.outputTopology = 2u;
+    return triangles;
+}
+
+void verifyTessellationRingAddresses() {
+    using namespace ShaderRecompiler;
+    const auto triangles = triangleTessellation(3u);
+    constexpr std::uint32_t recordStride = 0x150u;
+    auto hull = hullRingStores(recordStride);
+    constexpr std::array<std::uint32_t, 5> patches{0u, 1u, 2u, 40u, 84u};
+    std::vector<std::array<std::uint32_t, 4>> expected;
+    for (const auto patch : patches) {
+        for (std::uint32_t point = 0; point < triangles.outputControlPoints; ++point) expected.push_back({0u, point, patch, ringOffset(hull->point, point, patch)});
+        expected.push_back({1u, 0u, patch, ringOffset(hull->record, 0u, patch)});
+    }
+    TessellationLowering{}.Lower(hull->program, triangles);
+    std::optional<std::uint32_t> control;
+    std::optional<std::uint32_t> record;
+    for (const IrBlock* block : hull->program.BlockOrder()) {
+        for (const IrValue* inst : block->Instructions()) {
+            if (inst->Opcode() != IrOpcode::SetTessellationAttribute) continue;
+            require(inst->Argument(1)->Resolve()->HasImmediate(), "tessellation ring addresses: a lowered ring address is not a constant offset");
+            const auto kind = static_cast<TessellationAttribute>(inst->Argument(0)->Resolve()->ImmediateU32());
+            (kind == TessellationAttribute::PatchOutput ? record : control) = inst->Argument(1)->Resolve()->ImmediateU32();
+        }
+    }
+    const auto stride = hull->program.Metadata().tessellationControlStride;
+    require(control.has_value() && record.has_value() && stride == 16u, "tessellation ring addresses: the hull stores were not lowered to a 16-byte control point and a patch record");
+    for (const auto& [isRecord, point, patch, offset] : expected) {
+        if (isRecord == 0u) {
+            require(offset == patch * triangles.outputControlPoints * 16u + point * 16u, "tessellation ring addresses: the test program does not address the off-chip ring per control point");
+            require(offset == patch * triangles.outputControlPoints * stride + point * stride + *control, "tessellation ring addresses: a lowered control-point address differs from its off-chip ring offset");
+        } else {
+            require(offset == 0x8000u - recordStride * (patch + 1u), "tessellation ring addresses: the test program does not address its patch records down from the ring end");
+            require(offset + recordStride * patch == *record, "tessellation ring addresses: a lowered patch record differs from its off-chip ring offset");
+        }
+    }
+    expectFailure([] { TessellationLowering{}.Lower(hullRingStores(0x200u)->program, triangleTessellation(3u)); }, "not affine in the control point and relative patch", "patch records that wrap below zero at the 85th three-point patch were accepted");
+    expectFailure([] { TessellationLowering{}.Lower(hullRingStores(0x150u)->program, triangleTessellation(1u)); }, "not affine in the control point and relative patch", "patch records that wrap below zero at the 256th one-point patch were accepted");
+}
+
 ShaderRecompiler::ShaderPixelStageInfo twoParameterPixel() {
     ShaderRecompiler::ShaderPixelStageInfo pixel{};
     pixel.interpolatorCount = 2u;
@@ -3294,6 +3423,7 @@ int main(int argc, char** argv) {
         verifyNarrowVertexWave();
         verifySingleLaneVertexWave();
         verifyMeshConfiguration();
+        verifyTessellationRingAddresses();
         verifyPixelInputs();
         verifyPixelRequestSerialization();
         verifyLegacyPixelRequests();

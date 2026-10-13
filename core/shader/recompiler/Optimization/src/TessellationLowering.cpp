@@ -18,6 +18,7 @@ namespace ShaderRecompiler {
 namespace {
 
 constexpr std::int64_t PatchIndexCount = 256;
+constexpr std::int64_t HullThreadgroupVertexCount = 256;
 constexpr std::int64_t LocalVertexIndexCount = 8192;
 constexpr std::int64_t TriangleFactorBytes = 16;
 constexpr std::int64_t AddressLimit = 0xffffffffll;
@@ -57,6 +58,13 @@ bool IsBase(const IrValue* raw, TessellationBaseKind kind) {
 std::int64_t FloorDiv(std::int64_t value, std::int64_t divisor) {
     const auto quotient = value / divisor;
     return quotient * divisor > value ? quotient - 1 : quotient;
+}
+
+std::int64_t RelativeIndexCount(IrShaderStage stage, const ShaderTessellationInputInfo& tessellation) {
+    if (stage == IrShaderStage::Local) return LocalVertexIndexCount;
+    const auto vertices = std::max(tessellation.inputControlPoints, tessellation.outputControlPoints);
+    if (stage != IrShaderStage::TessellationControl || vertices == 0u) return PatchIndexCount;
+    return std::max<std::int64_t>(1, HullThreadgroupVertexCount / vertices);
 }
 
 IrValue* VariableOperand(IrValue* value, std::uint32_t constant) {
@@ -417,7 +425,7 @@ std::uint32_t ComponentCount(IrOpcode opcode) {
 class Lowering {
 public:
     Lowering(IrProgram& program, const ShaderTessellationInputInfo& tessellation)
-        : program(program), tessellation(tessellation), stage(program.Resources().stage), evaluator(stage == IrShaderStage::TessellationControl ? tessellation.outputControlPoints : 0u, stage == IrShaderStage::Local ? LocalVertexIndexCount : PatchIndexCount) {}
+        : program(program), tessellation(tessellation), stage(program.Resources().stage), evaluator(stage == IrShaderStage::TessellationControl ? tessellation.outputControlPoints : 0u, RelativeIndexCount(stage, tessellation)) {}
 
     void Run() {
         for (IrBlock* block : program.BlockOrder()) {

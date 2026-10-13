@@ -40,6 +40,26 @@ alignas(256) constexpr std::array<std::uint32_t, 49> HullCode{
     0xbf810000,
 };
 
+alignas(256) constexpr std::array<std::uint32_t, 50> HullWidePatchRecords{
+    0xd7650000, 0x000100c1, 0xd7660000, 0x000200c1, 0xbf8a0000, 0x7da206f9, 0x81060000, 0xd5480014,
+    0x02151101, 0x362402ff, 0x000000ff, 0x160028a0, 0xd5430015, 0x040224ff, 0x00000060, 0xdbfc0000,
+    0x02000015, 0x162c2890, 0xd5430016, 0x045a24ff, 0x00000030, 0xbf8cc07f, 0xe0781000, 0x02020216,
+    0x7da82881, 0xbe94047e, 0xb06a0060, 0x162602f9, 0x0086066a, 0xd8d80008, 0x06000013, 0xd8dc1008,
+    0x07000013, 0xbf8cc07f, 0x7e300306, 0x7e320306, 0x7e340306, 0x7e360306, 0x34142484, 0xbefe0414,
+    0xe0781000, 0x0403180a, 0x4a162481, 0x161616ff, 0x00000150, 0x4c1616ff, 0x00008000, 0xe0741000,
+    0x0202070b, 0xbf810000,
+};
+
+alignas(256) constexpr std::array<std::uint32_t, 50> HullOverflowingPatchRecords{
+    0xd7650000, 0x000100c1, 0xd7660000, 0x000200c1, 0xbf8a0000, 0x7da206f9, 0x81060000, 0xd5480014,
+    0x02151101, 0x362402ff, 0x000000ff, 0x160028a0, 0xd5430015, 0x040224ff, 0x00000060, 0xdbfc0000,
+    0x02000015, 0x162c2890, 0xd5430016, 0x045a24ff, 0x00000030, 0xbf8cc07f, 0xe0781000, 0x02020216,
+    0x7da82881, 0xbe94047e, 0xb06a0060, 0x162602f9, 0x0086066a, 0xd8d80008, 0x06000013, 0xd8dc1008,
+    0x07000013, 0xbf8cc07f, 0x7e300306, 0x7e320306, 0x7e340306, 0x7e360306, 0x34142484, 0xbefe0414,
+    0xe0781000, 0x0403180a, 0x4a162481, 0x161616ff, 0x00000200, 0x4c1616ff, 0x00008000, 0xe0741000,
+    0x0202070b, 0xbf810000,
+};
+
 alignas(256) constexpr std::array<std::uint32_t, 51> HullRestoredExecSaved{
     0xd7650000, 0x000100c1, 0xd7660000, 0x000200c1, 0xbf8a0000, 0x7da206f9, 0x81060000, 0xd5480014,
     0x02151101, 0x362402ff, 0x000000ff, 0x160028a0, 0xd5430015, 0x040224ff, 0x00000060, 0xdbfc0000,
@@ -347,10 +367,12 @@ int main() {
         ExpectRefusal(target, ShaderStage::TessellationEvaluation, DomainPatchRead, "patch constants");
         ExpectRefusal(target, ShaderStage::TessellationEvaluation, DomainCulledPrimitive, "passthrough primitive");
         ExpectRefusal(target, ShaderStage::Local, LocalIndexAsData, "outside a tessellation ring or LDS address");
+        ExpectRefusal(target, ShaderStage::TessellationControl, HullOverflowingPatchRecords, "not affine in the control point and relative patch");
 
         RequirePatches(*device, target, HullCode, "hull program");
         RequirePatches(*device, target, HullRestoredExecSaved, "hull program saving its restored exec");
         RequirePatches(*device, target, HullDynamicIndex, "hull program reading a control point at a computed index");
+        RequirePatches(*device, target, HullWidePatchRecords, "hull program writing 336-byte patch records down from the off-chip ring end");
         device.reset();
         RequireRegisteredStages();
         std::puts("Tessellation tests passed");
