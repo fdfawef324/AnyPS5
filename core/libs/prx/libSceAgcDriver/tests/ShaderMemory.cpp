@@ -610,7 +610,8 @@ void verifyMayPreservesMemoryPrefixes() {
             try {
                 require(!evaluator.Evaluate(&condition, result), "a varying condition unexpectedly evaluated");
             } catch (const std::runtime_error& error) {
-                threw = std::string(error.what()) == "generic prefix memory read failure";
+                if (std::string(error.what()) != "generic prefix memory read failure") throw;
+                threw = true;
             }
             require(threw == fail && state.calls == 1u, "a runtime memory prefix lost its callback or failure");
         }
