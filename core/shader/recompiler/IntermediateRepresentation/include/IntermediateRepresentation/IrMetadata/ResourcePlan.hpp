@@ -89,9 +89,9 @@ public:
     [[nodiscard]] IrValue& operator[](std::size_t index) { return values[index]; }
     [[nodiscard]] const IrValue& operator[](std::size_t index) const { return values[index]; }
     [[nodiscard]] IrValue* begin() { return values; }
-    [[nodiscard]] IrValue* end() { return values + count; }
+    [[nodiscard]] IrValue* end() { return count != 0 ? values + count : values; }
     [[nodiscard]] const IrValue* begin() const { return values; }
-    [[nodiscard]] const IrValue* end() const { return values + count; }
+    [[nodiscard]] const IrValue* end() const { return count != 0 ? values + count : values; }
 
 private:
     void release() {

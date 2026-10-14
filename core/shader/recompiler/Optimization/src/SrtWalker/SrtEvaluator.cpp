@@ -12,6 +12,7 @@
 #include <cstring>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -256,26 +257,35 @@ std::optional<bool> evaluableAlone(const IrResourcePlan& program, const IrValue&
         case IrOpcode::Phi: return std::nullopt;
         case IrOpcode::CompositeExtractU64:
         case IrOpcode::CompositeExtractU32x2: {
-            if (value.ArgumentCount() < 2) return true;
-            const auto* index = value.Argument(1) != nullptr ? value.Argument(1)->Resolve() : nullptr;
-            if (index == nullptr || !index->HasImmediate() || index->Type() != IrType::U32 || index->ImmediateU32() >= 2u) return false;
+            if (value.ArgumentCount() < 2) throw std::runtime_error("MayEvaluate encountered malformed required operands");
+            if (value.Argument(1) == nullptr) throw std::runtime_error("MayEvaluate encountered malformed required operands");
+            const auto* index = value.Argument(1)->Resolve();
+            if (!index->HasImmediate() || index->Type() != IrType::U32 || index->ImmediateU32() >= 2u) return false;
+            if (value.Argument(0) == nullptr) throw std::runtime_error("MayEvaluate encountered malformed required operands");
             if (value.Opcode() == IrOpcode::CompositeExtractU64) return std::nullopt;
-            const auto* source = value.Argument(0) != nullptr ? value.Argument(0)->Resolve() : nullptr;
-            if (source == nullptr || (source->Opcode() != IrOpcode::CompositeConstructU32x2 && source->Opcode() != IrOpcode::IAddCarry32)) return false;
+            const auto* source = value.Argument(0)->Resolve();
+            if (source->Opcode() == IrOpcode::CompositeConstructU32x2) {
+                if (index->ImmediateU32() >= source->ArgumentCount() || source->Argument(index->ImmediateU32()) == nullptr) throw std::runtime_error("MayEvaluate encountered malformed required operands");
+            } else if (source->Opcode() == IrOpcode::IAddCarry32) {
+                if (source->ArgumentCount() < 2u || source->Argument(0) == nullptr || source->Argument(1) == nullptr) throw std::runtime_error("MayEvaluate encountered malformed required operands");
+            } else return false;
             return std::nullopt;
         }
         default: break;
     }
     const auto arguments = evaluatedArguments(value.Opcode());
     if (!arguments) return false;
-    if (value.ArgumentCount() < *arguments) return true;
+    if (value.ArgumentCount() < *arguments) throw std::runtime_error("MayEvaluate encountered malformed required operands");
+    for (std::size_t index = 0; index < *arguments; ++index) if (value.Argument(index) == nullptr) throw std::runtime_error("MayEvaluate encountered malformed required operands");
     return std::nullopt;
 }
 
 }
 
-bool Evaluator::MayEvaluate(const IrResourcePlan& program, IrValue* value) {
+bool Evaluator::MayEvaluate(const IrResourcePlan& program, IrValue* value) try {
+    if (value == nullptr) return true;
     std::unordered_map<const IrValue*, bool> known;
+    std::unordered_set<const IrValue*> visiting;
     const auto requirements = [&program](IrValue* current) {
         std::vector<IrValue*> required;
         if (current->IsPhi()) {
@@ -315,15 +325,19 @@ bool Evaluator::MayEvaluate(const IrResourcePlan& program, IrValue* value) {
         }
         const auto required = requirements(current);
         if (!expanded) {
+            if (!visiting.insert(current).second) return true;
             pending.emplace_back(current, true);
             for (auto* argument : required) {
                 if (argument != nullptr) pending.emplace_back(argument, false);
             }
             continue;
         }
+        visiting.erase(current);
         known.emplace(current, std::ranges::all_of(required, [&known](const IrValue* argument) { return argument != nullptr && known.at(argument); }));
     }
     return known.at(value->Resolve());
+} catch (const std::runtime_error&) {
+    return true;
 }
 
 bool Evaluator::EvaluateInst(IrValue& inst, std::uint64_t& result) {

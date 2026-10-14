@@ -454,6 +454,85 @@ void verifyMayEvaluate() {
     }
 }
 
+void verifyMayEvaluateClosureSafety() {
+    using namespace ShaderRecompiler;
+    IrResourcePlan plan;
+    SrtRuntime runtime{};
+    std::vector<std::unique_ptr<IrValue>> values;
+    const auto make = [&](IrOpcode opcode, IrType type, std::initializer_list<IrValue*> arguments = {}) -> IrValue& {
+        values.push_back(std::make_unique<IrValue>(opcode, type, static_cast<std::uint32_t>(values.size())));
+        for (auto* argument : arguments) values.back()->AddArgument(argument);
+        return *values.back();
+    };
+    auto& constant = make(IrOpcode::Void, IrType::U32);
+    constant.SetImmediateU32(1u);
+    auto& self = make(IrOpcode::Phi, IrType::U32);
+    self.AddArgument(&self);
+    self.AddArgument(&constant);
+    auto& first = make(IrOpcode::Phi, IrType::U32);
+    auto& second = make(IrOpcode::Phi, IrType::U32);
+    first.AddArgument(&second);
+    first.AddArgument(&constant);
+    second.AddArgument(&first);
+    second.AddArgument(&constant);
+    for (auto* value : {&self, &first, &second}) {
+        require(Detail::Evaluator::MayEvaluate(plan, value), "an invariant cyclic phi was removed");
+        Detail::Evaluator evaluator(plan, runtime);
+        std::uint32_t result = 0;
+        require(evaluator.Evaluate(value, result) && result == 1u, "an invariant cyclic phi changed runtime evaluation");
+    }
+    auto& seedless = make(IrOpcode::Phi, IrType::U32);
+    seedless.AddArgument(&seedless);
+    require(!Detail::Evaluator::MayEvaluate(plan, &seedless), "a seedless phi was treated as evaluable");
+    auto& cycle = make(IrOpcode::Phi, IrType::U32);
+    auto& next = make(IrOpcode::IAdd32, IrType::U32, {&cycle, &constant});
+    cycle.AddArgument(&cycle);
+    cycle.AddArgument(&next);
+    require(Detail::Evaluator::MayEvaluate(plan, &cycle), "a dependency cycle was removed instead of retaining runtime evaluation");
+    Detail::Evaluator evaluator(plan, runtime);
+    std::uint32_t result = 0;
+    require(!evaluator.Evaluate(&cycle, result), "a dependency cycle changed runtime evaluation");
+    auto& identity = make(IrOpcode::Identity, IrType::U32);
+    auto& nullPhi = make(IrOpcode::Phi, IrType::U32, {nullptr});
+    auto& shortConstruct = make(IrOpcode::CompositeConstructU32x2, IrType::U32x2, {&constant});
+    auto& shortCarry = make(IrOpcode::IAddCarry32, IrType::U32x2, {&constant});
+    auto& extractConstruct = make(IrOpcode::CompositeExtractU32x2, IrType::U32, {&shortConstruct, &constant});
+    auto& extractCarry = make(IrOpcode::CompositeExtractU32x2, IrType::U32, {&shortCarry, &constant});
+    for (auto* value : {&identity, &nullPhi, &extractConstruct, &extractCarry}) {
+        require(Detail::Evaluator::MayEvaluate(plan, value), "a malformed condition suppressed its runtime failure");
+        bool failed = false;
+        try {
+            Detail::Evaluator malformed(plan, runtime);
+            static_cast<void>(malformed.Evaluate(value, result));
+        } catch (const std::exception&) {
+            failed = true;
+        }
+        require(failed, "a malformed condition no longer reports its runtime failure");
+    }
+    auto& lane = make(IrOpcode::GetRegister, IrType::U32);
+    for (auto* malformed : {&extractConstruct, &extractCarry}) {
+        auto& nested = make(IrOpcode::IAdd32, IrType::U32, {malformed, &lane});
+        require(Detail::Evaluator::MayEvaluate(plan, &nested), "a malformed left operand was hidden by an unevaluable right operand");
+        bool failed = false;
+        try {
+            Detail::Evaluator evaluator(plan, runtime);
+            static_cast<void>(evaluator.Evaluate(&nested, result));
+        } catch (const std::out_of_range&) {
+            failed = true;
+        }
+        require(failed, "a malformed left operand lost its original Argument failure");
+        auto& reversed = make(IrOpcode::IAdd32, IrType::U32, {&lane, malformed});
+        require(Detail::Evaluator::MayEvaluate(plan, &reversed), "a malformed right operand was removed");
+        Detail::Evaluator shortCircuit(plan, runtime);
+        require(!shortCircuit.Evaluate(&reversed, result), "an unevaluable left operand changed runtime short circuiting");
+    }
+    auto& nullAdd = make(IrOpcode::IAdd32, IrType::U32, {&constant, nullptr});
+    auto& nullConstruct = make(IrOpcode::CompositeConstructU32x2, IrType::U32x2, {&constant, nullptr});
+    auto& nullExtract = make(IrOpcode::CompositeExtractU32x2, IrType::U32, {&nullConstruct, &constant});
+    for (auto* value : {&nullAdd, &nullExtract}) require(Detail::Evaluator::MayEvaluate(plan, value), "a null required operand was removed");
+    require(Detail::Evaluator::MayEvaluate(plan, nullptr), "an absent public input was dereferenced");
+}
+
 void verifyEvaluatedValues() {
     using namespace ShaderRecompiler;
     std::vector<std::unique_ptr<IrValue>> values;
@@ -3633,6 +3712,7 @@ int main(int argc, char** argv) {
         verifyOutOfRangeConstantReads();
         verifySignedMinimum();
         verifyMayEvaluate();
+        verifyMayEvaluateClosureSafety();
         verifyPureFlatSlots();
         verifyGuardedDescriptorSources();
         verifyBindlessTable();
