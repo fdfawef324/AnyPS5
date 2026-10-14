@@ -557,6 +557,69 @@ void verifyMayEvaluateClosureSafety() {
     require(Detail::Evaluator::MayEvaluate(plan, nullptr), "an absent public input was dereferenced");
 }
 
+void verifyMayPreservesMemoryPrefixes() {
+    using namespace ShaderRecompiler;
+    IrResourcePlan plan;
+    std::vector<std::unique_ptr<IrValue>> values;
+    const auto make = [&](IrOpcode opcode, IrType type, std::initializer_list<IrValue*> arguments = {}) -> IrValue& {
+        values.push_back(std::make_unique<IrValue>(opcode, type, static_cast<std::uint32_t>(values.size())));
+        for (auto* argument : arguments) values.back()->AddArgument(argument);
+        return *values.back();
+    };
+    const auto constant = [&](std::uint32_t word) -> IrValue& {
+        auto& value = make(IrOpcode::Void, IrType::U32);
+        value.SetImmediateU32(word);
+        return value;
+    };
+    auto& zero = constant(0u);
+    auto& reg = make(IrOpcode::Void, IrType::ScalarReg);
+    reg.SetRegister({RegisterBank::Scalar, 0});
+    auto& offset = make(IrOpcode::GetUserData, IrType::U32, {&reg});
+    auto& handle = make(IrOpcode::GetAddressResource, IrType::AddressResource, {&constant(0x1000u), &zero});
+    auto& no = make(IrOpcode::Void, IrType::Bool);
+    no.SetImmediateBool(false);
+    auto& raw = make(IrOpcode::LoadAddressU32, IrType::U32, {&handle, &offset, &zero, &no});
+    MemoryFlags flags{};
+    raw.SetFlags(flags);
+    plan.memoryInfo.emplace_back();
+    plan.memoryInfo.back().kind = ResourceKind::ScalarAddress;
+    plan.srtReads.push_back({&raw, 0u});
+    auto& slot = make(IrOpcode::ReadConst, IrType::U32, {&make(IrOpcode::GetSrtResource, IrType::SrtResource), &zero});
+    auto& lane = make(IrOpcode::LaneId, IrType::U32);
+    const std::array<std::uint32_t, 1> data{0u};
+    struct ReadState { unsigned calls = 0; bool fail = false; };
+    for (auto* prefix : {&raw, &slot}) {
+        auto& sum = make(IrOpcode::IAdd32, IrType::U32, {prefix, &lane});
+        auto& condition = make(IrOpcode::IEqual32, IrType::Bool, {&sum, &zero});
+        require(Detail::Evaluator::MayEvaluate(plan, &condition), "a runtime memory prefix was removed before an unevaluable operand");
+        for (bool fail : {false, true}) {
+            ReadState state{0u, fail};
+            SrtRuntime runtime{data};
+            runtime.userContext = &state;
+            runtime.readMemory = +[](void* context, std::uint64_t address, std::uint32_t* word) {
+                auto& state = *static_cast<ReadState*>(context);
+                require(address == 0x1000u, "a runtime prefix read changed its address");
+                ++state.calls;
+                if (state.fail) throw std::runtime_error("generic prefix memory read failure");
+                *word = 9u;
+                return true;
+            };
+            Detail::Evaluator evaluator(plan, runtime);
+            std::uint32_t result = 0;
+            bool threw = false;
+            try {
+                require(!evaluator.Evaluate(&condition, result), "a varying condition unexpectedly evaluated");
+            } catch (const std::runtime_error& error) {
+                threw = std::string(error.what()) == "generic prefix memory read failure";
+            }
+            require(threw == fail && state.calls == 1u, "a runtime memory prefix lost its callback or failure");
+        }
+    }
+    auto& floating = make(IrOpcode::BitCastF32U32, IrType::F32, {&raw});
+    auto& unsupported = make(IrOpcode::FPOrdEqual32, IrType::Bool, {&floating, &floating});
+    require(!Detail::Evaluator::MayEvaluate(plan, &unsupported), "an unsupported opcode kept operands that the evaluator never reads");
+}
+
 void verifyEvaluatedValues() {
     using namespace ShaderRecompiler;
     std::vector<std::unique_ptr<IrValue>> values;
@@ -3737,6 +3800,7 @@ int main(int argc, char** argv) {
         verifySignedMinimum();
         verifyMayEvaluate();
         verifyMayEvaluateClosureSafety();
+        verifyMayPreservesMemoryPrefixes();
         verifyPureFlatSlots();
         verifyGuardedDescriptorSources();
         verifyBindlessTable();

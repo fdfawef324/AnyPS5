@@ -294,6 +294,7 @@ bool Evaluator::MayEvaluate(const IrResourcePlan& program, IrValue* value) try {
     if (value == nullptr) return true;
     std::unordered_map<const IrValue*, bool> known;
     std::unordered_set<const IrValue*> visiting;
+    bool mayReadMemory = false;
     const auto requirements = [&program](IrValue* current) {
         std::vector<IrValue*> required;
         if (current->IsPhi()) {
@@ -327,6 +328,7 @@ bool Evaluator::MayEvaluate(const IrResourcePlan& program, IrValue* value) try {
         const auto [current, expanded] = pending.back();
         pending.pop_back();
         if (known.contains(current)) continue;
+        if (!current->HasImmediate() && (current->Opcode() == IrOpcode::ReadConst || IsRawRead(program, *current))) mayReadMemory = true;
         if (const auto alone = evaluableAlone(program, *current)) {
             known.emplace(current, *alone);
             if (*alone && current->Opcode() == IrOpcode::ReadFirstLane) pending.emplace_back(current->Argument(0)->Resolve(), false);
@@ -364,7 +366,7 @@ bool Evaluator::MayEvaluate(const IrResourcePlan& program, IrValue* value) try {
         visiting.erase(current);
         known.emplace(current, std::ranges::all_of(required, [&known](const IrValue* argument) { return argument != nullptr && known.at(argument); }));
     }
-    return known.at(value->Resolve());
+    return known.at(value->Resolve()) || mayReadMemory;
 } catch (const std::runtime_error&) {
     return true;
 }
