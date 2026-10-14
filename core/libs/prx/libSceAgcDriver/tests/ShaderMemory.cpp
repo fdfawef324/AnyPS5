@@ -509,7 +509,9 @@ void verifyMayEvaluateClosureSafety() {
         }
         require(failed, "a malformed condition no longer reports its runtime failure");
     }
-    auto& lane = make(IrOpcode::GetRegister, IrType::U32);
+    auto& vector = make(IrOpcode::Void, IrType::VectorReg);
+    vector.SetRegister({RegisterBank::Vector, 0});
+    auto& lane = make(IrOpcode::GetRegister, IrType::U32, {&vector});
     for (auto* malformed : {&extractConstruct, &extractCarry}) {
         auto& nested = make(IrOpcode::IAdd32, IrType::U32, {malformed, &lane});
         require(Detail::Evaluator::MayEvaluate(plan, &nested), "a malformed left operand was hidden by an unevaluable right operand");
@@ -526,8 +528,9 @@ void verifyMayEvaluateClosureSafety() {
         Detail::Evaluator shortCircuit(plan, runtime);
         require(!shortCircuit.Evaluate(&reversed, result), "an unevaluable left operand changed runtime short circuiting");
     }
-    auto& activeSelect = make(IrOpcode::SelectU32, IrType::U32, {&lane, &constant, &lane});
-    auto& firstLane = make(IrOpcode::ReadFirstLane, IrType::U32, {&activeSelect, &lane});
+    auto& activeMask = make(IrOpcode::IEqual32, IrType::Bool, {&lane, &constant});
+    auto& activeSelect = make(IrOpcode::SelectU32, IrType::U32, {&activeMask, &constant, &lane});
+    auto& firstLane = make(IrOpcode::ReadFirstLane, IrType::U32, {&activeSelect, &activeMask});
     require(Detail::Evaluator::MayEvaluate(plan, &firstLane), "active-mask evaluation was pruned by ordinary dependency classification");
     Detail::Evaluator firstLaneEvaluator(plan, runtime);
     require(firstLaneEvaluator.Evaluate(&firstLane, result) && result == 1u, "first-lane active selection changed");
