@@ -249,11 +249,19 @@ std::optional<bool> evaluableAlone(const IrResourcePlan& program, const IrValue&
     }
     switch (value.Opcode()) {
         case IrOpcode::GetUserData:
-        case IrOpcode::GetShaderBase:
+            if (value.ArgumentCount() == 0u || value.Argument(0) == nullptr) throw std::runtime_error("MayEvaluate encountered malformed required operands");
+            return true;
+        case IrOpcode::GetShaderBase: return true;
         case IrOpcode::ReadFirstLane:
-        case IrOpcode::ReadConst: return true;
+        case IrOpcode::ReadConst:
+            if (value.ArgumentCount() < 2u || value.Argument(0) == nullptr || value.Argument(1) == nullptr) throw std::runtime_error("MayEvaluate encountered malformed required operands");
+            static_cast<void>(value.Argument(1)->Resolve());
+            return true;
         case IrOpcode::LoadAddressU32:
-        case IrOpcode::ReadConstBuffer: return IsRawRead(program, value);
+        case IrOpcode::ReadConstBuffer:
+            if (!IsRawRead(program, value)) return false;
+            if (value.ArgumentCount() < 2u || value.Argument(0) == nullptr || value.Argument(1) == nullptr) throw std::runtime_error("MayEvaluate encountered malformed required operands");
+            return true;
         case IrOpcode::Phi: return std::nullopt;
         case IrOpcode::CompositeExtractU64:
         case IrOpcode::CompositeExtractU32x2: {
@@ -321,6 +329,27 @@ bool Evaluator::MayEvaluate(const IrResourcePlan& program, IrValue* value) try {
         if (known.contains(current)) continue;
         if (const auto alone = evaluableAlone(program, *current)) {
             known.emplace(current, *alone);
+            if (*alone && current->Opcode() == IrOpcode::ReadFirstLane) pending.emplace_back(current->Argument(0)->Resolve(), false);
+            if (*alone && current->Opcode() == IrOpcode::ReadConst) {
+                const auto* slot = current->Argument(1)->Resolve();
+                if (slot->HasImmediate() && slot->Type() == IrType::U32 && slot->ImmediateU32() < program.srtReads.size()) {
+                    auto* read = program.srtReads[slot->ImmediateU32()].value;
+                    if (read == nullptr) throw std::runtime_error("MayEvaluate encountered malformed required operands");
+                    pending.emplace_back(read->Resolve(), false);
+                }
+            }
+            if (*alone && IsRawRead(program, *current)) {
+                auto* handle = current->Argument(0)->Resolve();
+                if (handle->Opcode() != IrOpcode::Void) {
+                    const std::size_t count = current->Opcode() == IrOpcode::ReadConstBuffer && handle->ArgumentCount() == 4u ? 4u : 2u;
+                    if (handle->ArgumentCount() < 2u) throw std::runtime_error("MayEvaluate encountered malformed required operands");
+                    for (std::size_t index = 0; index < count; ++index) {
+                        if (handle->Argument(index) == nullptr) throw std::runtime_error("MayEvaluate encountered malformed required operands");
+                        pending.emplace_back(handle->Argument(index)->Resolve(), false);
+                    }
+                    pending.emplace_back(current->Argument(1)->Resolve(), false);
+                }
+            }
             continue;
         }
         const auto required = requirements(current);

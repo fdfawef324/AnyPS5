@@ -526,6 +526,27 @@ void verifyMayEvaluateClosureSafety() {
         Detail::Evaluator shortCircuit(plan, runtime);
         require(!shortCircuit.Evaluate(&reversed, result), "an unevaluable left operand changed runtime short circuiting");
     }
+    auto& activeSelect = make(IrOpcode::SelectU32, IrType::U32, {&lane, &constant, &lane});
+    auto& firstLane = make(IrOpcode::ReadFirstLane, IrType::U32, {&activeSelect, &lane});
+    require(Detail::Evaluator::MayEvaluate(plan, &firstLane), "active-mask evaluation was pruned by ordinary dependency classification");
+    Detail::Evaluator firstLaneEvaluator(plan, runtime);
+    require(firstLaneEvaluator.Evaluate(&firstLane, result) && result == 1u, "first-lane active selection changed");
+    auto& shortUser = make(IrOpcode::GetUserData, IrType::U32);
+    auto& shortFirstLane = make(IrOpcode::ReadFirstLane, IrType::U32, {&constant});
+    auto& shortRead = make(IrOpcode::ReadConst, IrType::U32, {&constant});
+    auto& nestedFirstLane = make(IrOpcode::ReadFirstLane, IrType::U32, {&extractCarry, &constant});
+    for (auto* malformed : {&shortUser, &shortFirstLane, &shortRead, &nestedFirstLane}) {
+        auto& nested = make(IrOpcode::IAdd32, IrType::U32, {malformed, &lane});
+        require(Detail::Evaluator::MayEvaluate(plan, &nested), "an opaque malformed leaf suppressed its runtime failure");
+        bool failed = false;
+        try {
+            Detail::Evaluator evaluator(plan, runtime);
+            static_cast<void>(evaluator.Evaluate(&nested, result));
+        } catch (const std::out_of_range&) {
+            failed = true;
+        }
+        require(failed, "an opaque malformed leaf lost its Argument failure");
+    }
     auto& nullAdd = make(IrOpcode::IAdd32, IrType::U32, {&constant, nullptr});
     auto& nullConstruct = make(IrOpcode::CompositeConstructU32x2, IrType::U32x2, {&constant, nullptr});
     auto& nullExtract = make(IrOpcode::CompositeExtractU32x2, IrType::U32, {&nullConstruct, &constant});
