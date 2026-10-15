@@ -1820,6 +1820,62 @@ void verifyMalformedPlans() {
     require(!ShaderDiskCache::EncodePlan(unblocked, bytes), "a phi without predecessor blocks was encoded");
 }
 
+void verifyUndrawnPlanReload() {
+    const auto forgetPlan = [](const RecompileRequest& request, const SourceHandle& handle) {
+        ShaderDiskCache::Flush();
+        std::vector<std::byte> key;
+        ShaderDiskCache::BuildPlanKey(request, 32u, key);
+        const auto path = ShaderDiskCache::EntryDirectory() / ShaderDiskCache::EntryName(key);
+        require(std::filesystem::is_regular_file(path), "an undrawn plan was not persisted before the reload test");
+        std::filesystem::rename(path, path.string() + ".reload-preserved-" + std::to_string(std::random_device{}()));
+        ReleaseUndrawnResourcePlan(handle);
+    };
+    for (std::uint32_t kind = 0; kind != 4u; ++kind) {
+        auto fixture = planFixtures().front();
+        fixture.waveSize = 32u;
+        fixture.code.insert(fixture.code.begin(), 0xbf800000u | kind);
+        auto request = fixture.Request(true);
+        const auto handle = PrepareShader(request);
+        forgetPlan(request, *handle);
+        if (kind == 1u || kind == 2u) {
+            request.layout.pushConstantOffsetBytes = 16u;
+            request.layout.pushConstantSizeBytes = 112u;
+        }
+        RequestMemoryView memory(request.context.memory);
+        const auto runtime = memory.MakeRuntime(request.context.userData, request.shader.codeAddress);
+        if (kind < 2u) {
+            const auto invocation = PreparedShaderInvocation::TryCreate(request, handle);
+            require(invocation.has_value(), "a relocated prepared invocation was refused");
+            const auto capture = invocation->Capture(runtime);
+            static_cast<void>(invocation->Materialize(*capture));
+        } else if (kind == 2u) {
+            const auto capture = CaptureResources(request, runtime, *handle);
+            static_cast<void>(MaterializeShader(request, *capture, *handle));
+        } else {
+            static_cast<void>(GetResourcePlan(request));
+        }
+        request.layout.pushConstantSizeBytes = 0u;
+        ShaderPreparationContext preparation;
+        static_cast<void>(PrepareShader(request, &preparation));
+        require(preparation.ResourcePrograms() == 1u, "a released plan kept unused full IR after serving a prepared artifact");
+    }
+    auto fixture = planFixtures().front();
+    fixture.waveSize = 32u;
+    fixture.code.insert(fixture.code.begin(), 0xbf800004u);
+    const auto request = fixture.Request(true);
+    const auto handle = PrepareShader(request);
+    forgetPlan(request, *handle);
+    auto newLayout = request;
+    newLayout.layout.pushConstantSizeBytes = 0u;
+    static_cast<void>(GetResourcePlan(newLayout));
+    RequestMemoryView memory(request.context.memory);
+    const auto capture = CaptureResources(request, memory.MakeRuntime(request.context.userData, request.shader.codeAddress), *handle);
+    static_cast<void>(MaterializeShader(request, *capture, *handle));
+    ShaderPreparationContext preparation;
+    static_cast<void>(PrepareShader(newLayout, &preparation));
+    require(preparation.ResourcePrograms() == 0u, "a prepared capture discarded the full IR awaiting a new layout");
+}
+
 void verifyPlanRoundTrip() {
     const auto handBuilt = handBuiltPlan();
     const auto handBytes = encodedPlan(handBuilt);
@@ -1876,6 +1932,7 @@ void verifyPlanRoundTrip() {
     const auto beforeKeep = ShaderDiskCache::Totals();
     ReleaseUndrawnResourcePlan(*registeredHandle);
     require(GetResourcePlan(registeredRequest) == runtimeCapture->plan && ShaderDiskCache::Totals().planHits == beforeKeep.planHits, "a runtime-captured plan was released");
+    verifyUndrawnPlanReload();
     const auto covers = [&](const std::function<bool(const IrResourcePlan&)>& predicate) {
         return std::any_of(plans.begin(), plans.end(), [&](const std::shared_ptr<const IrResourcePlan>& plan) { return predicate(*plan); });
     };
@@ -2098,6 +2155,16 @@ void verifyDefaultDirectory(const char* self) {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--undrawn-plan-reload") {
+            const auto directory = std::filesystem::temp_directory_path() / ("aps5-undrawn-plan-reload-" + std::to_string(std::random_device{}()));
+            require(std::filesystem::create_directory(directory), "cannot create an isolated undrawn-plan reload directory");
+            setEnvironment("ANYPS5_NO_SHADER_CACHE", "0");
+            setEnvironment("ANYPS5_SHADER_CACHE_DIR", directory.string());
+            verifyUndrawnPlanReload();
+            ShaderDiskCache::Flush();
+            std::cout << "undrawn plan reload tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--resource-plan-codec") {
             verifyResultRoundTrip();
             verifyEntryRoundTrip();
