@@ -1893,6 +1893,31 @@ void verifyPlanRoundTrip() {
     static_cast<void>(PrepareShader(secondLayout, &preparation));
     require(preparation.ResourcePrograms() == 1u, "a plan reload retained full IR after an artifact for that layout was already available");
 
+    auto relocatedFixture = fixtures.front();
+    relocatedFixture.waveSize = 32u;
+    relocatedFixture.code.insert(relocatedFixture.code.begin(), 0xbf800005u);
+    const auto relocatedRequest = relocatedFixture.Request(true);
+    const auto relocatedHandle = PrepareShader(relocatedRequest);
+    static_cast<void>(GetResourcePlan(relocatedRequest));
+    ShaderDiskCache::Flush();
+    std::vector<std::byte> relocatedKey;
+    ShaderDiskCache::BuildPlanKey(relocatedRequest, 32u, relocatedKey);
+    const auto relocatedPath = ShaderDiskCache::EntryDirectory() / ShaderDiskCache::EntryName(relocatedKey);
+    std::filesystem::rename(relocatedPath, relocatedPath.string() + ".reload-preserved");
+    ReleaseUndrawnResourcePlan(*relocatedHandle);
+    auto drawn = relocatedRequest;
+    drawn.layout.pushConstantOffsetBytes = 16u;
+    drawn.layout.pushConstantSizeBytes = 112u;
+    const auto relocatedInvocation = PreparedShaderInvocation::TryCreate(drawn, relocatedHandle);
+    require(relocatedInvocation.has_value(), "the prepared artifact refused a relocated push layout");
+    RequestMemoryView drawnMemory(drawn.context.memory);
+    static_cast<void>(relocatedInvocation->Materialize(*relocatedInvocation->Capture(drawnMemory.MakeRuntime(drawn.context.userData, drawn.shader.codeAddress))));
+    auto relocatedProbe = relocatedRequest;
+    relocatedProbe.layout.pushConstantSizeBytes = 0u;
+    ShaderPreparationContext relocatedPreparation;
+    static_cast<void>(PrepareShader(relocatedProbe, &relocatedPreparation));
+    require(relocatedPreparation.ResourcePrograms() == 1u, "a plan reload retained full IR after the prepared artifact served a relocated push layout");
+
     RequestMemoryView registeredMemory(registeredRequest.context.memory);
     const auto runtimeCapture = CaptureResources(registeredRequest, registeredMemory.MakeRuntime(registeredRequest.context.userData, registeredRequest.shader.codeAddress), *registeredHandle);
     const auto beforeKeep = ShaderDiskCache::Totals();
